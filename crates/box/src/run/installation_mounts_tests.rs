@@ -264,7 +264,7 @@ fn an_empty_or_malformed_mount_table_is_refused() {
 }
 
 #[test]
-fn an_unreadable_mapped_alias_refuses_the_inventory() {
+fn an_unreadable_mapped_alias_is_protected_as_an_alias() {
     struct RestoreAccess {
         path: PathBuf,
         permissions: std::fs::Permissions,
@@ -295,13 +295,16 @@ fn an_unreadable_mapped_alias_refuses_the_inventory() {
         fixture.filesystem(),
         fixture.mount("/storage/install/launcher", &hidden),
     ];
-    let error = names_at_mounts(
+    let aliases = names_at_mounts(
         std::slice::from_ref(&fixture.installed),
         fixture.identity(),
         &mounts,
     )
-    .unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+    .expect("an uninspectable name does not refuse the inventory");
+    assert!(
+        aliases.contains(&hidden),
+        "the uninspectable name is protected as an alias: {aliases:?}"
+    );
 }
 
 #[test]
