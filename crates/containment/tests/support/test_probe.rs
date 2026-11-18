@@ -776,6 +776,7 @@ fn linux_main() -> ExitCode {
         Some("--return-to-locked-folder") => return_to_locked_folder(&args[2..]),
         Some("--enter-inherited-folder") => enter_inherited_folder(&args[2..]),
         Some("--read-xattrs") => read_xattrs(&args[2..]),
+        Some("--wait-for-file") => wait_for_file(&args[2..]),
         Some("--attempt-executable-memory-write") => proc_mem_probe::run(),
         Some("--attempt-supervisor-memory-write") => {
             match args.get(2).and_then(|uid| uid.parse::<libc::uid_t>().ok()) {
@@ -791,12 +792,36 @@ fn linux_main() -> ExitCode {
                 "usage: containment-test-probe \
                  (--unix-ipc | --shell-child | --verify-no-inherited-handles | \
                  --return-to-saved-folder | --return-to-locked-folder | \
-                 --enter-inherited-folder | --read-xattrs | \
+                 --enter-inherited-folder | --read-xattrs | --wait-for-file | \
                  --attempt-supervisor-memory-write | --attempt-executable-memory-write) ..."
             );
             ExitCode::from(2)
         }
     }
+}
+
+/// `--wait-for-file <path> <seconds>`: wait for `<path>` to exist. Prints `FILE_APPEARED` and the
+/// file's contents when it does, or `FILE_NEVER_APPEARED` when the time runs out.
+#[cfg(target_os = "linux")]
+fn wait_for_file(args: &[String]) -> ExitCode {
+    let (Some(path), Some(seconds)) = (
+        args.first(),
+        args.get(1).and_then(|s| s.parse::<u64>().ok()),
+    ) else {
+        eprintln!("probe: --wait-for-file requires a path and a number of seconds");
+        return ExitCode::from(2);
+    };
+    println!("WAITING");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    while std::time::Instant::now() < deadline {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            println!("FILE_APPEARED {}", contents.trim());
+            return ExitCode::SUCCESS;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    println!("FILE_NEVER_APPEARED");
+    ExitCode::from(1)
 }
 
 /// `--read-xattrs <file>`: list the file's extended attributes with `listxattr`, `llistxattr`, and

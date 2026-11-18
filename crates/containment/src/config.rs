@@ -31,6 +31,9 @@ pub struct ContainmentConfig {
     /// Program files that keep the link count they had when opened.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     command_identities: Vec<CommandIdentity>,
+    /// Directories, each a write grant, where a mount that arrives after the view is built appears.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    receive_mounts: Vec<PathBuf>,
     #[serde(deserialize_with = "deserialize_validated_network")]
     network: Network,
     process: Process,
@@ -97,6 +100,7 @@ impl ContainmentConfig {
             write_protections: Vec::new(),
             write_protected_trees: Vec::new(),
             command_identities: Vec::new(),
+            receive_mounts: Vec::new(),
             network: Network::Blocked,
             process: Process::default(),
             backend_override: BackendOverride::None,
@@ -315,6 +319,57 @@ impl ContainmentConfig {
         Ok(self)
     }
 
+    /// Show the workload a mount that arrives at `path` after the view is built. `path` is a
+    /// directory that a write grant names exactly. Linux only; macOS sees every mount already.
+    pub fn receive_mounts(mut self, path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        if self.receive_mounts.contains(&path) {
+            return Err(ContainmentError::ConflictingGrants {
+                reason: format!("{} receives mounts twice", path.display()),
+            });
+        }
+        self.require_receivable(&path)?;
+        self.receive_mounts.push(path);
+        Ok(self)
+    }
+
+    /// Refuse a receiving path that is not exactly a write grant, or that a protection lies under.
+    fn require_receivable(&self, path: &Path) -> Result<()> {
+        if !path.is_absolute() || !path.is_dir() {
+            return Err(ContainmentError::ConfigValidation(format!(
+                "{} receives mounts, but it is not an existing absolute directory",
+                path.display()
+            )));
+        }
+        if !self
+            .grants_in(Operation::Write, Scope::Root)
+            .iter()
+            .any(|root| root.resolved == path)
+        {
+            return Err(ContainmentError::ConfigValidation(format!(
+                "{} receives mounts, but no write grant names it",
+                path.display()
+            )));
+        }
+        if self
+            .write_protected_trees
+            .iter()
+            .any(|tree| tree.path.starts_with(path))
+        {
+            return Err(ContainmentError::ConfigValidation(format!(
+                "{} receives mounts, and a mount arriving there would cover its write protection",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Every directory that receives mounts arriving after the view is built.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn received_mounts(&self) -> &[PathBuf] {
+        &self.receive_mounts
+    }
+
     /// Refuse a write-protected tree that no write grant reaches, or that a refusal already removes.
     fn require_protectable(&self, tree: &Path) -> Result<()> {
         if !self
@@ -455,6 +510,9 @@ impl ContainmentConfig {
         config.validate_discovery()?;
         for tree in &config.write_protected_trees {
             config.require_protectable(&tree.path)?;
+        }
+        for path in &config.receive_mounts {
+            config.require_receivable(path)?;
         }
         Ok(config)
     }

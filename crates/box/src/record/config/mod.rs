@@ -801,6 +801,8 @@ const DENY_WRITE_RECORD_VERSION: u32 = 38;
 /// The record version of a record that holds a `[secret-source.<scheme>]` table or a `secret.env`
 /// key, so an older build refuses the box by its version.
 const SECRET_SOURCE_RECORD_VERSION: u32 = 39;
+/// The record version of a record whose agent declares a `filesystem.receive_mounts` list.
+const RECEIVE_MOUNTS_RECORD_VERSION: u32 = 41;
 
 /// Monty is on unless the operator turns it off.
 fn monty_default() -> bool {
@@ -881,7 +883,12 @@ fn record_version<'a>(
     secret_source_keys: bool,
 ) -> u32 {
     let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
-    if telemetry::names_tool_calls(targets) {
+    if specs
+        .clone()
+        .any(|spec| !spec.filesystem.receive_mounts.is_empty())
+    {
+        RECEIVE_MOUNTS_RECORD_VERSION
+    } else if telemetry::names_tool_calls(targets) {
         TOOL_CALLS_RECORD_VERSION
     } else if secret_source_keys {
         SECRET_SOURCE_RECORD_VERSION
@@ -1208,6 +1215,7 @@ impl Record {
             DENY_WRITE_RECORD_VERSION,
             SECRET_SOURCE_RECORD_VERSION,
             TOOL_CALLS_RECORD_VERSION,
+            RECEIVE_MOUNTS_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -3409,7 +3417,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, TOOL_CALLS_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, RECEIVE_MOUNTS_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
