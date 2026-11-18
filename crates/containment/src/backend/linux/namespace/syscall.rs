@@ -206,6 +206,32 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "fchdir",
         number: libc::SYS_fchdir,
     },
+    // Reading extended attributes reaches nothing a read cannot: the path is already in the view.
+    // Python's `shutil.copy2` lists them and raises on `EPERM`, though it accepts "not supported".
+    PermittedSyscall {
+        name: "listxattr",
+        number: libc::SYS_listxattr,
+    },
+    PermittedSyscall {
+        name: "llistxattr",
+        number: libc::SYS_llistxattr,
+    },
+    PermittedSyscall {
+        name: "flistxattr",
+        number: libc::SYS_flistxattr,
+    },
+    PermittedSyscall {
+        name: "getxattr",
+        number: libc::SYS_getxattr,
+    },
+    PermittedSyscall {
+        name: "lgetxattr",
+        number: libc::SYS_lgetxattr,
+    },
+    PermittedSyscall {
+        name: "fgetxattr",
+        number: libc::SYS_fgetxattr,
+    },
     PermittedSyscall {
         name: "fchmod",
         number: libc::SYS_fchmod,
@@ -1454,7 +1480,7 @@ mod tests {
     #[test]
     fn permit_filter_has_the_expected_workload_and_installer_entries() {
         let x86_entries = usize::from(cfg!(target_arch = "x86_64"));
-        assert_eq!(WORKLOAD_PERMITTED.len(), 118 + 18 * x86_entries);
+        assert_eq!(WORKLOAD_PERMITTED.len(), 124 + 18 * x86_entries);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
         assert_eq!(rules.len(), 121 + 19 * x86_entries);
