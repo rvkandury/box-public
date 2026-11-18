@@ -775,6 +775,7 @@ fn linux_main() -> ExitCode {
         Some("--return-to-saved-folder") => return_to_saved_folder(&args[2..]),
         Some("--return-to-locked-folder") => return_to_locked_folder(&args[2..]),
         Some("--enter-inherited-folder") => enter_inherited_folder(&args[2..]),
+        Some("--read-xattrs") => read_xattrs(&args[2..]),
         Some("--attempt-executable-memory-write") => proc_mem_probe::run(),
         Some("--attempt-supervisor-memory-write") => {
             match args.get(2).and_then(|uid| uid.parse::<libc::uid_t>().ok()) {
@@ -790,12 +791,79 @@ fn linux_main() -> ExitCode {
                 "usage: containment-test-probe \
                  (--unix-ipc | --shell-child | --verify-no-inherited-handles | \
                  --return-to-saved-folder | --return-to-locked-folder | \
-                 --enter-inherited-folder | \
+                 --enter-inherited-folder | --read-xattrs | \
                  --attempt-supervisor-memory-write | --attempt-executable-memory-write) ..."
             );
             ExitCode::from(2)
         }
     }
+}
+
+/// `--read-xattrs <file>`: list the file's extended attributes with `listxattr`, `llistxattr`, and
+/// `flistxattr`, and read one with `getxattr`, as Python's `shutil.copy2` does. Prints
+/// `XATTRS_READ` when no call is refused with `EPERM`.
+#[cfg(target_os = "linux")]
+fn read_xattrs(args: &[String]) -> ExitCode {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd as _;
+
+    let Some(path) = args.first() else {
+        eprintln!("probe: --read-xattrs requires a file");
+        return ExitCode::from(2);
+    };
+    let c_path = CString::new(path.as_str()).expect("path without NUL");
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("probe FAILED: open {path}: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut buffer = [0_u8; 256];
+    let refused = |name: &str, result: isize| {
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if result < 0 && errno == libc::EPERM {
+            eprintln!("probe FAILED: {name} refused with EPERM");
+            true
+        } else {
+            false
+        }
+    };
+    // SAFETY: valid NUL-terminated path, descriptor, and buffer with its length.
+    let results = unsafe {
+        [
+            (
+                "listxattr",
+                libc::listxattr(c_path.as_ptr(), buffer.as_mut_ptr().cast(), buffer.len()),
+            ),
+            (
+                "llistxattr",
+                libc::llistxattr(c_path.as_ptr(), buffer.as_mut_ptr().cast(), buffer.len()),
+            ),
+            (
+                "flistxattr",
+                libc::flistxattr(file.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len()),
+            ),
+            (
+                "getxattr",
+                libc::getxattr(
+                    c_path.as_ptr(),
+                    c"user.probe".as_ptr(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                ),
+            ),
+        ]
+    };
+    let mut failed = false;
+    for (name, result) in results {
+        failed |= refused(name, result);
+    }
+    if failed {
+        return ExitCode::from(1);
+    }
+    println!("XATTRS_READ");
+    ExitCode::SUCCESS
 }
 
 /// `--return-to-saved-folder <dir>`: enter `<dir>`, save it as an open descriptor, enter a
