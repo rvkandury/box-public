@@ -121,6 +121,8 @@ pub(crate) struct DirectReach {
     pub(crate) write_protections: Vec<PathBuf>,
     /// The directory each of `write_protections` named when the run judged it.
     pub(crate) write_protection_identities: Vec<FileIdentity>,
+    /// The `receive_mounts` directories, canonical, each a `write` entry.
+    pub(crate) receive_mounts: Vec<PathBuf>,
 }
 
 /// What the paths in one spec are judged against.
@@ -227,11 +229,17 @@ pub(crate) fn direct_grants(
             ));
         }
     }
+    let receive_mounts = lists
+        .receive_mounts
+        .iter()
+        .map(|entry| receiving_directory(entry, &grants, &write_protections, context))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(DirectReach {
         grants,
         refusals,
         write_protections,
         write_protection_identities,
+        receive_mounts,
         command: None,
         installation: None,
     })
@@ -434,6 +442,87 @@ fn denial(entry: &Path, context: &FilesystemContext<'_>) -> Result<Refusal, Conf
 }
 
 /// A `deny_write` entry, which names an existing directory.
+/// A `receive_mounts` entry: an existing directory that the agent's `write` list names exactly,
+/// with no `deny_write` directory under it.
+fn receiving_directory(
+    entry: &Path,
+    grants: &[DirectGrant],
+    write_protections: &[PathBuf],
+    context: &FilesystemContext<'_>,
+) -> Result<PathBuf, ConfigError> {
+    let authored = entry.display().to_string();
+    if context.table != "[agent]" {
+        return Err(refuse(
+            context,
+            &authored,
+            "`receive_mounts` is for the agent only: a tool or MCP server starts later and judges \
+             its paths when it starts",
+        ));
+    }
+    let lexical = expand_home(entry, &authored, context)?;
+    let resolved = match std::fs::symlink_metadata(&lexical) {
+        Ok(metadata) if metadata.is_dir() => lexical.canonicalize().map_err(|error| {
+            refuse(
+                context,
+                &authored,
+                &format!("cannot resolve {}: {error}", lexical.display()),
+            )
+        })?,
+        Ok(_) => {
+            return Err(refuse(
+                context,
+                &authored,
+                &format!("{} is not a directory", lexical.display()),
+            ));
+        }
+        Err(error) => {
+            return Err(refuse(
+                context,
+                &authored,
+                &format!("{} does not exist: {error}", lexical.display()),
+            ));
+        }
+    };
+    if resolved != lexical {
+        return Err(refuse(
+            context,
+            &authored,
+            &format!(
+                "name the directory by its canonical path, {}",
+                resolved.display()
+            ),
+        ));
+    }
+    if !grants.iter().any(|grant| {
+        grant.operation == Operation::Write
+            && grant.scope == Scope::Root
+            && grant.resolved == resolved
+    }) {
+        return Err(refuse(
+            context,
+            &authored,
+            &format!(
+                "{} is not a `write` entry; `receive_mounts` names a directory the agent writes",
+                resolved.display()
+            ),
+        ));
+    }
+    if write_protections
+        .iter()
+        .any(|tree| tree.starts_with(&resolved))
+    {
+        return Err(refuse(
+            context,
+            &authored,
+            &format!(
+                "a `deny_write` directory lies under {}, and a mount arriving there would cover it",
+                resolved.display()
+            ),
+        ));
+    }
+    Ok(resolved)
+}
+
 fn write_protection(
     entry: &Path,
     context: &FilesystemContext<'_>,

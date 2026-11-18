@@ -83,6 +83,8 @@ pub(crate) struct MountView {
     grant_pins: Vec<ObjectPin>,
     dependency_sources: RefCell<BTreeMap<PathBuf, Rc<std::fs::File>>>,
     mount_locations: RefCell<BTreeMap<PathBuf, PathBuf>>,
+    /// Directories where a mount arriving after the view is built still appears.
+    receive_mounts: Vec<PathBuf>,
 }
 
 impl MountView {
@@ -596,6 +598,7 @@ impl MountView {
                 .collect(),
             dependency_sources: RefCell::new(dependency_sources),
             mount_locations: RefCell::new(BTreeMap::new()),
+            receive_mounts: config.received_mounts().to_vec(),
         })
     }
 
@@ -607,15 +610,16 @@ impl MountView {
 
     /// Execute the plan and `pivot_root` into it.
     pub(crate) fn materialize(&self) -> Result<(), ContainmentError> {
-        // Detach this namespace's propagation from the host's before mounting anything.
-        mount_syscall(
-            None,
-            Path::new("/"),
-            None,
-            libc::MS_REC | libc::MS_PRIVATE,
-            None,
-        )
-        .map_err(|e| refusal(format!("making the mount tree private: {e}")))?;
+        // Detach this namespace's propagation from the host's before mounting anything. A view
+        // with receiving paths keeps one-way propagation until it is pivoted, then keeps it only
+        // at those paths.
+        let propagation = if self.receive_mounts.is_empty() {
+            libc::MS_PRIVATE
+        } else {
+            libc::MS_SLAVE
+        };
+        mount_syscall(None, Path::new("/"), None, libc::MS_REC | propagation, None)
+            .map_err(|e| refusal(format!("making the mount tree private: {e}")))?;
 
         // A FIXED path under the host's world-writable `/tmp`, created with `create_dir_all`, was a
         // symlink-following TOCTOU: `create_dir_all` follows symlinks, so a pre-placed link
@@ -665,6 +669,7 @@ impl MountView {
         .map_err(|e| refusal(format!("remounting the view root read-only: {e}")))?;
 
         self.pivot_into(root)?;
+        self.keep_only_receivers_listening()?;
         for pin in &self.grant_pins {
             pin.release()?;
         }
@@ -977,6 +982,50 @@ impl MountView {
         Ok(())
     }
 
+    /// Make every mount in the pivoted view private except the receiving paths, so a mount that
+    /// arrives later appears there and nowhere else.
+    fn keep_only_receivers_listening(&self) -> Result<(), ContainmentError> {
+        if self.receive_mounts.is_empty() {
+            return Ok(());
+        }
+        let table = std::fs::read_to_string("/proc/self/mountinfo")
+            .map_err(|e| refusal(format!("reading the view's mount table: {e}")))?;
+        let mut points: Vec<PathBuf> = table
+            .lines()
+            .filter_map(|line| line.split(' ').nth(4))
+            .map(|field| PathBuf::from(decode_mountinfo_field(field)))
+            .collect();
+        points.sort();
+        points.dedup();
+        for point in points {
+            if self.receive_mounts.contains(&point) {
+                continue;
+            }
+            mount_syscall(None, &point, None, libc::MS_PRIVATE, None)
+                .map_err(|e| refusal(format!("making '{}' private: {e}", point.display())))?;
+        }
+        let table = std::fs::read_to_string("/proc/self/mountinfo")
+            .map_err(|e| refusal(format!("reading the view's mount table: {e}")))?;
+        for path in &self.receive_mounts {
+            let receives = table.lines().any(|line| {
+                let mut fields = line.split(' ');
+                fields.nth(4).map(decode_mountinfo_field).as_deref() == path.to_str()
+                    && line
+                        .split(" - ")
+                        .next()
+                        .is_some_and(|left| left.contains("master:"))
+            });
+            if !receives {
+                return Err(refusal(format!(
+                    "'{}' receives mounts, but its mount in the view has no propagation source; \
+                     the host side must be a shared or receiving mount",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// `pivot_root` into the assembled view and detach the old root.
     fn pivot_into(&self, root: &Path) -> Result<(), ContainmentError> {
         // `materialize` created this before sealing the root read-only.
@@ -1126,6 +1175,30 @@ fn require_grant_identity(target: &Path, expected: ObjectIdentity) -> Result<(),
 }
 
 /// Remount `target` read-only, and every submount beneath it.
+/// Decode the octal escapes the kernel writes in a mount table field.
+fn decode_mountinfo_field(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\'
+            && i + 3 < bytes.len()
+            && bytes[i + 1..i + 4]
+                .iter()
+                .all(|b| (b'0'..=b'7').contains(b))
+        {
+            let value =
+                (bytes[i + 1] - b'0') * 64 + (bytes[i + 2] - b'0') * 8 + (bytes[i + 3] - b'0');
+            out.push(value);
+            i += 4;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn remount_read_only(target: &Path, subtree: &Path) -> Result<(), ContainmentError> {
     const FLAGS: libc::c_ulong =
         libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV;
@@ -4093,6 +4166,7 @@ mod tests {
             grant_pins: Vec::new(),
             dependency_sources: RefCell::new(BTreeMap::new()),
             mount_locations: RefCell::new(BTreeMap::new()),
+            receive_mounts: Vec::new(),
         };
         let mut entry = MountEntry {
             source: None,
@@ -4122,6 +4196,7 @@ mod tests {
             grant_pins: Vec::new(),
             dependency_sources: RefCell::new(BTreeMap::new()),
             mount_locations: RefCell::new(BTreeMap::new()),
+            receive_mounts: Vec::new(),
         };
         let entry = MountEntry {
             source: Some(source),
@@ -4163,6 +4238,7 @@ mod tests {
             grant_pins: Vec::new(),
             dependency_sources: RefCell::new(BTreeMap::new()),
             mount_locations: RefCell::new(BTreeMap::new()),
+            receive_mounts: Vec::new(),
         };
         let entry = MountEntry {
             source: None,
@@ -4224,6 +4300,7 @@ mod tests {
                 grant_pins: Vec::new(),
                 dependency_sources: RefCell::new(BTreeMap::new()),
                 mount_locations: RefCell::new(BTreeMap::new()),
+                receive_mounts: Vec::new(),
             };
             let entry = MountEntry {
                 source: Some(source),
@@ -4469,6 +4546,7 @@ mod tests {
                 grant_pins: Vec::new(),
                 dependency_sources: RefCell::new(BTreeMap::new()),
                 mount_locations: RefCell::new(BTreeMap::new()),
+                receive_mounts: Vec::new(),
             };
             let error = view.pivot_into(&root).unwrap_err();
             assert!(
@@ -4549,6 +4627,7 @@ mod tests {
                 grant_pins: Vec::new(),
                 dependency_sources: RefCell::new(BTreeMap::new()),
                 mount_locations: RefCell::new(BTreeMap::new()),
+                receive_mounts: Vec::new(),
             };
             let argument =
                 (kind == MountKind::Bind && denied_call == libc::SYS_openat).then_some((
@@ -4665,6 +4744,7 @@ mod tests {
             grant_pins: Vec::new(),
             dependency_sources: RefCell::new(BTreeMap::new()),
             mount_locations: RefCell::new(BTreeMap::new()),
+            receive_mounts: Vec::new(),
         };
         let error = view.establish(&entry, root.path()).unwrap_err();
         assert!(

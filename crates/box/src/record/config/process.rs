@@ -104,6 +104,10 @@ pub(crate) struct Filesystem {
     pub(crate) deny: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) deny_write: Vec<PathBuf>,
+    /// Directories, each a `write` entry of the agent, where a mount that arrives after the box
+    /// starts appears. Not one of the grant lists: it adds no reach.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) receive_mounts: Vec<PathBuf>,
 }
 
 /// Which of the nine lists an entry came from.
@@ -157,7 +161,7 @@ impl Grant {
 
 impl Filesystem {
     pub(crate) fn is_empty(&self) -> bool {
-        Grant::ALL.iter().all(|kind| self.list(*kind).is_empty())
+        Grant::ALL.iter().all(|kind| self.list(*kind).is_empty()) && self.receive_mounts.is_empty()
     }
 
     /// One list, by kind.

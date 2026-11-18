@@ -716,6 +716,8 @@ const TELEMETRY_EXPORT_RECORD_VERSION: u32 = 36;
 const MONTY_OFF_RECORD_VERSION: u32 = 37;
 /// The record version of a record whose process declares a `filesystem.deny_write` list.
 const DENY_WRITE_RECORD_VERSION: u32 = 38;
+/// The record version of a record whose agent declares a `filesystem.receive_mounts` list.
+const RECEIVE_MOUNTS_RECORD_VERSION: u32 = 39;
 
 /// Monty is on unless the operator turns it off.
 fn monty_default() -> bool {
@@ -789,6 +791,11 @@ fn record_version<'a>(
 ) -> u32 {
     let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
     if specs
+        .clone()
+        .any(|spec| !spec.filesystem.receive_mounts.is_empty())
+    {
+        RECEIVE_MOUNTS_RECORD_VERSION
+    } else if specs
         .clone()
         .any(|spec| !spec.filesystem.deny_write.is_empty())
     {
@@ -1095,6 +1102,7 @@ impl Record {
             TELEMETRY_EXPORT_RECORD_VERSION,
             MONTY_OFF_RECORD_VERSION,
             DENY_WRITE_RECORD_VERSION,
+            RECEIVE_MOUNTS_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -3229,7 +3237,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, DENY_WRITE_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, RECEIVE_MOUNTS_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

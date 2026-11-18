@@ -704,6 +704,9 @@ impl Boundary {
         for tree in &reach.write_protections {
             containment = containment.protect_write_tree(tree)?;
         }
+        for path in &reach.receive_mounts {
+            containment = containment.receive_mounts(path)?;
+        }
 
         if let Some(command) = reach.command.as_ref() {
             command.verify()?;
@@ -784,6 +787,7 @@ impl Boundary {
             table,
             grants: &reach.grants,
             write_protections: &reach.write_protections,
+            receive_mounts: &reach.receive_mounts,
             minimum: &minimum,
             interpreters: &interpreters,
             interpreter_aliases: &interpreter_aliases,
@@ -954,6 +958,7 @@ struct DisclosureInputs<'a> {
     table: &'a str,
     grants: &'a [DirectGrant],
     write_protections: &'a [PathBuf],
+    receive_mounts: &'a [PathBuf],
     minimum: &'a [MinimumCell],
     interpreters: &'a [PathBuf],
     interpreter_aliases: &'a [(PathBuf, PathBuf)],
@@ -1005,6 +1010,12 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
             .iter()
             .map(|tree| format!("  deny_write  {}  (read-only)", tree.display())),
     );
+    lines.extend(inputs.receive_mounts.iter().map(|path| {
+        format!(
+            "  receive     {}  (a mount that arrives here later appears too)",
+            path.display()
+        )
+    }));
     if !inputs.command_listed {
         lines.push(format!(
             "  exec        {}  (command, implicit)",
